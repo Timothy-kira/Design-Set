@@ -1,0 +1,1307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Halo Glow Studio</title>
+<style>
+  :root {
+    --bg: #0b0d12;
+    --panel: #14171f;
+    --panel-2: #1b1f29;
+    --line: #262b38;
+    --text: #e8ebf2;
+    --muted: #8b93a7;
+    --accent: #8fd1ff;
+    --stage: #0f1219;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: grid;
+    grid-template-columns: 1fr 340px;
+  }
+
+  /* ---------------------------------------------------------------- stage */
+  .stage {
+    display: flex; flex-direction: column; min-width: 0;
+    padding: 24px 28px; gap: 16px; overflow: hidden;
+  }
+  .stage-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  .stage-head h1 { font-size: 17px; font-weight: 600; margin: 0; letter-spacing: -0.01em; }
+  .stage-head p { margin: 0; color: var(--muted); font-size: 13px; }
+  .stage-head .spacer { flex: 1; }
+  .status {
+    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .stage-body { flex: 1; display: grid; place-items: center; min-height: 0; }
+  #frame {
+    position: relative; border-radius: 10px; overflow: hidden;
+    box-shadow: 0 24px 60px -20px rgba(0,0,0,.9), 0 0 0 1px var(--line);
+    background: var(--stage); cursor: crosshair; touch-action: none;
+    max-width: 100%; max-height: 100%;
+  }
+  #gl { display: block; width: 100%; height: 100%; }
+  /* The guide layer draws the hand-drawn path and the live light position.
+   * It never takes a pointer event - the GL canvas below handles the drag.
+   * It must not share an id with the .overlay curtain: an id rule here would
+   * out-specify `.overlay[hidden] { display: none }` and the curtain could
+   * never be dismissed. */
+  #guide {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    pointer-events: none; display: block;
+  }
+  #frame.drawing { cursor: crosshair; }
+  #frame.drawing #gl { filter: saturate(0.55) brightness(0.72); }
+  #frame.drawing::after {
+    content: "Draw the light path — press Finish when done";
+    position: absolute; left: 50%; top: 12px; transform: translateX(-50%);
+    background: var(--accent); color: #06121c; font-size: 12px; font-weight: 500;
+    padding: 5px 12px; border-radius: 999px; pointer-events: none;
+  }
+  .hint-pill {
+    position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%);
+    background: rgba(11,13,18,.72); border: 1px solid var(--line);
+    color: var(--muted); font-size: 11.5px; padding: 4px 11px;
+    border-radius: 999px; pointer-events: none; white-space: nowrap;
+  }
+  .stage-foot { color: var(--muted); font-size: 12px; display: flex; gap: 16px; flex-wrap: wrap; }
+  .stage-foot kbd {
+    font: inherit; font-size: 11px; background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px;
+  }
+
+  /* -------------------------------------------------------------- panel */
+  .panel {
+    background: var(--panel); border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .panel-head { padding: 18px 18px 12px; border-bottom: 1px solid var(--line); }
+  .panel-head h2 { margin: 0 0 4px; font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+  .panel-head p { margin: 0; color: var(--muted); font-size: 12px; }
+  .panel-body { overflow-y: auto; padding: 4px 18px 24px; flex: 1; }
+  .panel-body::-webkit-scrollbar { width: 10px; }
+  .panel-body::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
+  /* Finished exports stay reachable here. A browser that has already saved
+   * several files from one page quietly refuses the next auto-download, and
+   * the file is otherwise gone. */
+  .downloads { border-top: 1px solid var(--line); padding: 10px 18px 14px; }
+  .downloads:empty { display: none; }
+  .download-item {
+    display: block; font-size: 11.5px; color: var(--accent);
+    text-decoration: none; padding: 4px 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .download-item:hover { text-decoration: underline; }
+
+  .group { padding: 16px 0 4px; border-bottom: 1px solid var(--line); }
+  .group:last-child { border-bottom: 0; }
+  .group > h3 {
+    margin: 0 0 12px; font-size: 11px; font-weight: 600;
+    letter-spacing: .1em; text-transform: uppercase; color: var(--muted);
+  }
+
+  .field { margin-bottom: 14px; }
+  .field > label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: var(--muted); margin-bottom: 6px; gap: 8px;
+  }
+  .field .value { color: var(--text); font-variant-numeric: tabular-nums; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .row input[type="range"] { flex: 1; }
+  .row input[type="number"] {
+    width: 68px; flex: none; text-align: right;
+  }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; height: 3px; border-radius: 2px;
+    background: var(--line); outline: none; margin: 0;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--text); cursor: pointer; border: 0;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 13px; height: 13px; border-radius: 50%;
+    background: var(--text); cursor: pointer; border: 0;
+  }
+  input[type="number"], input[type="text"], select {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 8px; font: inherit; font-size: 12px;
+    font-variant-numeric: tabular-nums; outline: none;
+  }
+  input[type="number"]:focus, input[type="text"]:focus, select:focus {
+    border-color: var(--accent);
+  }
+  input[type="color"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 28px;
+    background: none; border: 1px solid var(--line); border-radius: 6px; padding: 2px;
+  }
+  input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+  input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 4px; }
+
+  .seg { display: flex; gap: 4px; background: var(--panel-2); padding: 3px; border-radius: 7px; }
+  .seg button {
+    flex: 1; padding: 6px 4px; font: inherit; font-size: 12px; cursor: pointer;
+    background: none; border: 0; border-radius: 5px; color: var(--muted);
+  }
+  .seg button[aria-pressed="true"] { background: var(--panel); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  select { width: 100%; cursor: pointer; }
+
+  .actions { display: flex; gap: 8px; margin-top: 10px; }
+  button.primary, button.ghost {
+    flex: 1; padding: 9px 10px; font: inherit; font-size: 12px; font-weight: 500;
+    border-radius: 7px; cursor: pointer; border: 1px solid var(--line);
+  }
+  button.primary { background: var(--accent); color: #06121c; border-color: transparent; }
+  button.ghost { background: var(--panel-2); color: var(--text); }
+  button.primary:disabled, button.ghost:disabled { opacity: .45; cursor: not-allowed; }
+
+  .note { color: var(--muted); font-size: 11.5px; margin: 8px 0 0; line-height: 1.45; }
+  .overlay {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    background: rgba(11,13,18,.82); font-size: 13px; color: var(--muted);
+    text-align: center; padding: 20px; transition: opacity .2s;
+  }
+  .overlay[hidden] { display: none; }
+  .overlay-inner { display: grid; gap: 12px; justify-items: center; max-width: 260px; }
+  .overlay progress {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    border: 0; border-radius: 2px; background: var(--line); overflow: hidden;
+  }
+  .overlay progress::-webkit-progress-bar { background: var(--line); }
+  .overlay progress::-webkit-progress-value { background: var(--accent); }
+  .overlay progress::-moz-progress-bar { background: var(--accent); }
+  .overlay .pct { font-variant-numeric: tabular-nums; font-size: 12px; }
+  .overlay button {
+    padding: 7px 16px; font: inherit; font-size: 12px; cursor: pointer;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+
+<section class="stage">
+  <div class="stage-head">
+    <h1>Halo Glow</h1>
+    <p>Signed distance field + spectral optics, in WebGL2.</p>
+    <div class="spacer"></div>
+    <span class="status" id="status">initialising</span>
+  </div>
+  <div class="stage-body">
+    <div id="frame" class="drawing-off">
+      <canvas id="gl"></canvas>
+      <canvas id="guide"></canvas>
+      <div class="overlay" id="overlay">
+        <div class="overlay-inner">
+          <div id="overlayText">building distance field…</div>
+          <div id="videoProgress" hidden>
+            <progress id="videoBar" max="1" value="0"></progress>
+            <div class="pct" id="videoLabel">0%</div>
+            <button type="button" id="videoCancel">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="stage-foot">
+    <span>Drag the canvas to move the light.</span>
+    <span>Light position may sit outside the frame.</span>
+  </div>
+</section>
+
+<aside class="panel">
+  <div class="panel-head">
+    <h2>Controls</h2>
+    <p>Drag a slider or type a value.</p>
+  </div>
+  <div class="panel-body" id="controls"></div>
+  <div class="downloads" id="downloads"></div>
+</aside>
+
+<input type="file" id="svgFile" accept="image/svg+xml,.svg" hidden />
+<input type="file" id="backgroundFile" accept="image/*" hidden />
+
+<script src="../src/distance-field.js"></script>
+<script src="../src/halo-glow.js"></script>
+<script>/* inline-glyph:start */
+window.__HALO_GLYPH__ = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1000 1000\" width=\"1000\" height=\"1000\">\n  <title>Twelve-Phase Halo</title>\n  <path fill=\"#ffffff\" fill-rule=\"evenodd\" d=\"M 978.0 500.0 C 978.0 510.43 948.13 548.57 948.13 559.0 C 946.73 568.76 912.89 600.49 911.48 610.26 C 909.08 619.24 920.0 663.99 917.59 672.97 C 913.93 682.13 917.63 729.84 913.96 739.0 C 908.74 748.03 863.81 766.13 858.6 775.16 C 852.5 782.91 807.33 793.47 801.23 801.23 C 794.65 807.8 781.73 852.02 775.16 858.6 C 767.41 864.69 746.75 907.86 739.0 913.96 C 729.97 919.18 682.01 912.38 672.97 917.59 C 663.81 921.26 619.42 907.82 610.26 911.48 C 601.28 913.89 567.98 945.73 559.0 948.13 C 549.23 949.54 509.76 976.59 500.0 978.0 C 489.57 978.0 451.43 948.13 441.0 948.13 C 431.24 946.73 399.51 912.89 389.74 911.48 C 380.76 909.08 336.01 920.0 327.03 917.59 C 317.87 913.93 270.16 917.63 261.0 913.96 C 251.97 908.74 233.87 863.81 224.84 858.6 C 217.09 852.5 206.53 807.33 198.77 801.23 C 192.2 794.65 147.98 781.73 141.4 775.16 C 135.31 767.41 92.14 746.75 86.04 739.0 C 80.82 729.97 87.62 682.01 82.41 672.97 C 78.74 663.81 92.18 619.42 88.52 610.26 C 86.11 601.28 54.27 567.98 51.87 559.0 C 50.46 549.23 23.41 509.76 22.0 500.0 C 22.0 489.57 51.87 451.43 51.87 441.0 C 53.27 431.24 87.11 399.51 88.52 389.74 C 90.92 380.76 80.0 336.01 82.41 327.03 C 86.07 317.87 82.37 270.16 86.04 261.0 C 91.26 251.97 136.19 233.87 141.4 224.84 C 147.5 217.09 192.67 206.53 198.77 198.77 C 205.35 192.2 218.27 147.98 224.84 141.4 C 232.59 135.31 253.25 92.14 261.0 86.04 C 270.03 80.82 317.99 87.62 327.03 82.41 C 336.19 78.74 380.58 92.18 389.74 88.52 C 398.72 86.11 432.02 54.27 441.0 51.87 C 450.77 50.46 490.24 23.41 500.0 22.0 C 510.43 22.0 548.57 51.87 559.0 51.87 C 568.76 53.27 600.49 87.11 610.26 88.52 C 619.24 90.92 663.99 80.0 672.97 82.41 C 682.13 86.07 729.84 82.37 739.0 86.04 C 748.03 91.26 766.13 136.19 775.16 141.4 C 782.91 147.5 793.47 192.67 801.23 198.77 C 807.8 205.35 852.02 218.27 858.6 224.84 C 864.69 232.59 907.86 253.25 913.96 261.0 C 919.18 270.03 912.38 317.99 917.59 327.03 C 921.26 336.19 907.82 380.58 911.48 389.74 C 913.89 398.72 945.73 432.02 948.13 441.0 C 949.54 450.77 976.59 490.24 978.0 500.0 Z M 668.0 500.0 C 668.0 592.78 592.78 668.0 500.0 668.0 C 407.22 668.0 332.0 592.78 332.0 500.0 C 332.0 407.22 407.22 332.0 500.0 332.0 C 592.78 332.0 668.0 407.22 668.0 500.0 Z M 612.0 500.0 C 438.14 612.0 388.0 561.86 500.0 612.0 C 388.0 438.14 438.14 388.0 388.0 500.0 C 561.86 388.0 612.0 438.14 500.0 388.0 C 612.0 561.86 561.86 612.0 612.0 500.0 Z M 574.0 194.0 C 574.0 234.87 540.87 268.0 500.0 268.0 C 459.13 268.0 426.0 234.87 426.0 194.0 C 426.0 153.13 459.13 120.0 500.0 120.0 C 540.87 120.0 574.0 153.13 574.0 194.0 Z M 787.13 311.61 C 755.69 362.1 726.57 362.1 741.13 357.61 C 690.64 326.17 690.64 297.04 695.13 311.61 C 726.57 261.12 755.69 261.12 741.13 265.61 C 791.62 297.04 791.62 326.17 787.13 311.61 Z M 865.02 542.59 C 768.78 604.59 741.02 576.83 803.02 604.59 C 741.02 508.35 768.78 480.59 741.02 542.59 C 837.26 480.59 865.02 508.35 803.02 480.59 C 865.02 576.83 837.26 604.59 865.02 542.59 Z M 726.39 741.13 C 646.68 753.16 646.68 729.1 688.39 779.13 C 676.36 699.42 700.42 699.42 650.39 741.13 C 730.1 729.1 730.1 753.16 688.39 703.13 C 700.42 782.84 676.36 782.84 726.39 741.13 Z M 481.97 796.91 C 369.97 765.98 395.04 740.91 425.97 852.91 C 456.9 740.91 481.97 765.98 369.97 796.91 C 481.97 827.84 456.9 852.91 425.97 740.91 C 395.04 852.91 369.97 827.84 481.97 796.91 Z M 244.69 563.62 C 186.76 515.33 214.62 515.33 200.69 607.62 C 248.98 549.69 248.98 577.55 156.69 563.62 C 214.62 611.92 186.76 611.92 200.69 519.62 C 152.39 577.55 152.39 549.69 244.69 563.62 Z M 353.43 279.88 C 323.89 213.88 353.43 243.43 287.43 345.88 C 353.43 316.33 323.89 345.88 221.43 279.88 C 250.98 345.88 221.43 316.33 287.43 213.88 C 221.43 243.43 250.98 213.88 353.43 279.88 Z\"/>\n  <!-- outer, ring-outer, ring-inner, satellite, satellite, satellite, satellite, satellite, satellite, satellite -->\n</svg>\n";
+/* inline-glyph:end */</script>
+<script>
+(function () {
+  'use strict';
+
+  /* The default artwork is inlined so the page also works straight off the
+   * filesystem, where fetch() of a sibling file is blocked. The file on disk
+   * stays the single source of truth, and tools/inline_glyph.py keeps the two
+   * in sync - run it after any change to the glyph. */
+  var INLINE_GLYPH = window.__HALO_GLYPH__ || null;
+
+  var ASPECTS = {
+    '1:1': [1080, 1080],
+    '4:5': [1080, 1350],
+    '9:16': [1080, 1920],
+    '4:3': [1440, 1080],
+    '16:9': [1920, 1080]
+  };
+
+  var frame = document.getElementById('frame');
+  var canvas = document.getElementById('gl');
+  var overlay = document.getElementById('overlay');
+  var overlayText = document.getElementById('overlayText');
+  var videoProgress = document.getElementById('videoProgress');
+  var videoBar = document.getElementById('videoBar');
+  var videoLabel = document.getElementById('videoLabel');
+  var videoCancel = document.getElementById('videoCancel');
+  var statusEl = document.getElementById('status');
+  var controlsEl = document.getElementById('controls');
+  var downloadsEl = document.getElementById('downloads');
+  var svgFile = document.getElementById('svgFile');
+  var backgroundFile = document.getElementById('backgroundFile');
+
+  var stage = null;
+  var glyphText = null;
+  var uploadedImage = null;
+  var guideCanvas = document.getElementById('guide');
+  var guideCtx = guideCanvas.getContext('2d');
+  var drawing = false;          // drawing a path instead of moving the light
+  // Strokes, not one running point list: each press starts a new stroke and
+  // every stroke survives until Finish or Clear. A single buffer cannot express
+  // two disjoint strokes - the second press always destroys the first.
+  var strokes = [];              // array of strokes, each an array of uv points
+  var activeStroke = null;       // the stroke under the cursor right now
+  var animate = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var sceneTime = 0;
+  var lastFrame = null;
+  var needsDraw = true;
+  var busy = false;
+  var uploadVersion = 0;
+
+  function setStatus(text) { statusEl.textContent = text; }
+
+  function fail(message) {
+    overlay.hidden = false;
+    videoProgress.hidden = true;
+    overlayText.textContent = message;
+    setStatus('error');
+  }
+
+  function busy_(on, message) {
+    busy = on;
+    overlay.hidden = !on;
+    videoProgress.hidden = true;
+    if (message) overlayText.textContent = message;
+  }
+
+  function showVideoProgress(fraction) {
+    overlay.hidden = false;
+    videoProgress.hidden = false;
+    videoBar.value = fraction;
+    videoLabel.textContent = Math.round(fraction * 100) + '%';
+  }
+
+  /* ------------------------------------------------------------- controls */
+
+  var VIDEO_FPS = 30;
+
+  /* MP4 first so the file drops straight into a timeline; WebM is the honest
+   * fallback rather than a silent .mp4 that will not open. */
+  var VIDEO_FORMATS = [
+    ['video/mp4;codecs=avc1.42E01E', 'mp4'],
+    ['video/mp4', 'mp4'],
+    ['video/webm;codecs=vp9', 'webm'],
+    ['video/webm;codecs=vp8', 'webm'],
+    ['video/webm', 'webm']
+  ];
+
+  var videoSupport = (function () {
+    if (typeof MediaRecorder === 'undefined' ||
+        typeof HTMLCanvasElement === 'undefined' ||
+        !HTMLCanvasElement.prototype.captureStream) return null;
+    for (var i = 0; i < VIDEO_FORMATS.length; i += 1) {
+      if (MediaRecorder.isTypeSupported(VIDEO_FORMATS[i][0])) return VIDEO_FORMATS[i];
+    }
+    return null;
+  })();
+
+  var SPEC = [
+    { group: 'Artwork', items: [
+      { type: 'segment', key: 'sourceType', label: 'Source', options: ['svg', 'text', 'upload'] },
+      { type: 'text', key: 'sourceText', label: 'Text', when: function (v) { return v.sourceType === 'text'; } },
+      { type: 'range', key: 'size', label: 'Size', min: 20, max: 100, step: 1, scale: 100,
+        when: function (v) { return v.sourceType !== 'upload'; } },
+      { type: 'range', key: 'posX', label: 'Position X', min: -50, max: 50, step: 0.5, unit: '%' },
+      { type: 'range', key: 'posY', label: 'Position Y', min: -50, max: 50, step: 0.5, unit: '%' }
+    ]},
+    { group: 'Light', items: [
+      { type: 'range', key: 'glow', label: 'Intensity', min: 0, max: 3, step: 0.01 },
+      { type: 'range', key: 'blur', label: 'Radial blur', min: 0.01, max: 0.14, step: 0.001, digits: 3 },
+      { type: 'range', key: 'blurContrast', label: 'Defocus contrast', min: 0, max: 2, step: 0.01 },
+      { type: 'range', key: 'dispersion', label: 'Dispersion', min: 0, max: 0.012, step: 0.0002, digits: 4 },
+      { type: 'range', key: 'lightX', label: 'Light X', min: -60, max: 160, step: 0.5, unit: '%' },
+      { type: 'range', key: 'lightY', label: 'Light Y', min: -60, max: 160, step: 0.5, unit: '%' }
+    ]},
+    { group: 'Light path', items: [
+      { type: 'actions', actions: [
+        { id: 'toggleDraw', label: 'Draw path' },
+        { id: 'clearPath', label: 'Clear' }
+      ]},
+      { type: 'toggle', key: 'pingPong', label: 'Ping-pong' },
+      { type: 'range', key: 'flowSpeed', label: 'Path speed', min: 0, max: 3, step: 0.01,
+        when: function () { return !!(stage && stage.hasPath()); }},
+      { type: 'range', key: 'drift', label: 'Idle drift', min: 0, max: 2.5, step: 0.01,
+        when: function () { return !(stage && stage.hasPath()); }},
+      { type: 'note', text: 'Draw on the canvas to trace the route the light follows. '
+        + 'The line may run off the edge of the frame. With no route, the light '
+        + 'drifts on its own so the preview never sits still.' }
+    ]},
+    { group: 'Style', items: [
+      { type: 'segment', key: 'style', label: 'Look', options: [
+        ['glow', 'Glow'], ['neon', 'Neon'], ['rim', 'Rim']
+      ]},
+      { type: 'range', key: 'interior', label: 'Body glow', min: 0, max: 1, step: 0.01,
+        when: function (v) { return v.style === 'neon' || v.style === 'rim'; }},
+      { type: 'color', key: 'fillColor', label: 'Body colour',
+        when: function (v) { return v.style === 'neon' || v.style === 'rim'; }},
+      { type: 'range', key: 'rainbow', label: 'Spectrum rim', min: 0, max: 1, step: 0.01,
+        when: function (v) { return v.style === 'neon' || v.style === 'rim'; }},
+      { type: 'range', key: 'rainbowCycles', label: 'Rim cycles', min: 0.5, max: 4, step: 0.1,
+        when: function (v) { return v.rainbow > 0; }},
+      { type: 'range', key: 'godrays', label: 'Downward spill', min: 0, max: 2, step: 0.01,
+        when: function (v) { return v.style === 'neon' || v.style === 'rim'; }},
+      { type: 'note', text: 'Glow lights the whole shape. Neon and Rim turn it into a '
+        + 'backlit cutout: the body goes flat, the contour carries the spectrum, and '
+        + 'the light falls out of frame below.' }
+    ]},
+    { group: 'Lens', items: [
+      { type: 'range', key: 'sun', label: 'Source flare', min: 0, max: 2, step: 0.01 },
+      { type: 'range', key: 'streak', label: 'Streaks', min: 0, max: 2, step: 0.01 },
+      { type: 'range', key: 'rings', label: 'Lens rings', min: 0, max: 2, step: 0.01 },
+      { type: 'range', key: 'ghost', label: 'Ghosts', min: 0, max: 2, step: 0.01 }
+    ]},
+    { group: 'Tone', items: [
+      { type: 'color', key: 'glowColor', label: 'Core colour' },
+      { type: 'color', key: 'glowColor2', label: 'Outer bloom colour' },
+      { type: 'range', key: 'adaptiveGlow', label: 'Adopt colours', min: 0, max: 1, step: 0.01 }
+    ]},
+    { group: 'Background', items: [
+      { type: 'segment', key: 'bgMode', label: 'Source', options: ['preset', 'color', 'image'] },
+      { type: 'select', key: 'palette', label: 'Sky preset', options: [
+        ['day', 'Daylight'], ['dawn', 'Dawn'], ['blue', 'Blue hour'],
+        ['pearl', 'Pearl'], ['ink', 'Ink']
+      ], when: function (v) { return v.bgMode === 'preset'; }},
+      { type: 'color', key: 'bgColor', label: 'Colour', when: function (v) { return v.bgMode === 'color'; }},
+      { type: 'actions', actions: [
+        { id: 'uploadBackground', label: 'Upload image' }
+      ], when: function (v) { return v.bgMode === 'image'; }},
+      { type: 'select', key: 'bgFit', label: 'Fit', options: [
+        ['cover', 'Cover'], ['contain', 'Contain']
+      ], when: function (v) { return v.bgMode === 'image'; }}
+    ]},
+    { group: 'Motion', items: [
+      { type: 'toggle', key: 'animate', label: 'Animate light' },
+      { type: 'range', key: 'exaggeration', label: 'Exaggeration', min: 0, max: 1, step: 0.01 },
+      { type: 'range', key: 'flowSpeed', label: 'Flow speed', min: 0, max: 3, step: 0.01,
+        when: function () { return !(stage && stage.hasPath()); }},
+      { type: 'range', key: 'seed', label: 'Seed', min: 0, max: 12, step: 0.01 }
+    ]},
+    { group: 'Output', items: [
+      { type: 'select', key: 'aspect', label: 'Canvas', options: [
+        ['9:16', '9:16 · Story'], ['4:5', '4:5 · Portrait'], ['1:1', '1:1 · Square'],
+        ['4:3', '4:3 · Landscape'], ['16:9', '16:9 · Widescreen']
+      ]},
+      { type: 'actions', actions: [
+        { id: 'randomize', label: 'Randomise' },
+        { id: 'reset', label: 'Reset' }
+      ]},
+      { type: 'select', key: 'videoDuration', label: 'Video length', options: [
+        ['5', '5 seconds'], ['10', '10 seconds'], ['15', '15 seconds']
+      ], when: function (v) { return videoSupport !== null; }},
+      { type: 'actions', actions: [
+        { id: 'export', label: 'Export PNG' }
+      ]},
+      { type: 'actions', actions: [
+        { id: 'exportVideo', label: 'Export video', primary: videoSupport !== null }
+      ]},
+      { type: 'note', text: videoSupport
+        ? 'Video renders ' + VIDEO_FPS + ' fps at full output size. Exporting takes about as '
+          + 'long as the clip, because the browser timestamps frames in real time. '
+          + (videoSupport[1] === 'mp4' ? 'Format: MP4.' : 'Format: WebM - this browser cannot encode MP4.')
+        : 'Video export needs MediaRecorder (Chrome, Edge, or Safari 16+). PNG export still works.' }
+    ]}
+  ];
+
+  var view = {
+    sourceType: 'svg', sourceText: 'AURA', size: 0.82,
+    posX: 0, posY: 0,
+    glow: 1.45, blur: 0.068, blurContrast: 1, dispersion: 0.0045,
+    lightX: 36, lightY: 31,
+    sun: 1.1, streak: 0.88, rings: 0.76, ghost: 0.82,
+    glowColor: '#8fd1ff', glowColor2: '#4c6bff', adaptiveGlow: 1,
+    style: 'glow', interior: 1, fillColor: '#2b6fd6',
+    rainbow: 0, rainbowCycles: 1, godrays: 0,
+    bgMode: 'preset', palette: 'day', bgColor: '#10131a', bgFit: 'cover',
+    pingPong: true, drift: 1,
+    animate: animate, exaggeration: 0.35, flowSpeed: 1, seed: 2.371,
+    aspect: '9:16', videoDuration: '5'
+  };
+
+  var INITIAL = JSON.parse(JSON.stringify(view));
+  var readout = {};
+
+  function buildControls() {
+    controlsEl.innerHTML = '';
+    SPEC.forEach(function (group) {
+      var section = document.createElement('div');
+      section.className = 'group';
+      var heading = document.createElement('h3');
+      heading.textContent = group.group;
+      section.appendChild(heading);
+
+      group.items.forEach(function (item) {
+        var node = buildItem(item);
+        if (node) { node.dataset.item = item.key; section.appendChild(node); }
+      });
+      controlsEl.appendChild(section);
+    });
+  }
+
+  function buildItem(item) {
+    if (item.when && !item.when(view)) return null;
+
+    if (item.type === 'actions') {
+      var wrap = document.createElement('div');
+      wrap.className = 'actions';
+      item.actions.forEach(function (action) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.action = action.id;
+        // The draw button is a mode, so its label has to report the mode.
+        button.textContent = action.id === 'toggleDraw'
+          ? (drawing ? 'Finish path' : 'Draw path')
+          : action.label;
+        button.className = action.primary ? 'primary'
+          : (action.id === 'toggleDraw' && drawing ? 'primary' : 'ghost');
+        button.addEventListener('click', function () { handleAction(action.id); });
+        wrap.appendChild(button);
+      });
+      return wrap;
+    }
+
+    if (item.type === 'note') {
+      var note = document.createElement('p');
+      note.className = 'note';
+      note.textContent = item.text;
+      return note;
+    }
+
+    var field = document.createElement('div');
+    field.className = 'field';
+    var label = document.createElement('label');
+    label.htmlFor = 'f-' + item.key;
+    var text = document.createElement('span');
+    text.textContent = item.label;
+    var value = document.createElement('span');
+    value.className = 'value';
+    label.appendChild(text);
+    label.appendChild(value);
+    readout[item.key] = value;
+    field.appendChild(label);
+
+    if (item.type === 'segment') {
+      var seg = document.createElement('div');
+      seg.className = 'seg';
+      // Accepts either 'name' or ['value', 'Label'], matching the select type.
+      item.options.forEach(function (entry) {
+        var optionValue = Array.isArray(entry) ? entry[0] : entry;
+        var optionLabel = Array.isArray(entry) ? entry[1] : entry;
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = optionLabel;
+        button.dataset.option = optionValue;
+        button.setAttribute('aria-pressed', String(view[item.key] === optionValue));
+        button.addEventListener('click', function () {
+          // The artwork switch changes what gets drawn, so it rebuilds; the
+          // look switch only changes how light is applied.
+          if (item.key === 'sourceType') {
+            view[item.key] = optionValue;
+            if (optionValue === 'upload') { svgFile.click(); return; }
+            buildControls();
+            applyShape();
+            return;
+          }
+          setValue(item, optionValue);
+        });
+        seg.appendChild(button);
+      });
+      field.appendChild(seg);
+      return field;
+    }
+
+    var row = document.createElement('div');
+    row.className = 'row';
+
+    if (item.type === 'select') {
+      var select = document.createElement('select');
+      select.id = 'f-' + item.key;
+      select.dataset.key = item.key;
+      item.options.forEach(function (option) {
+        var opt = document.createElement('option');
+        opt.value = option[0];
+        opt.textContent = option[1];
+        select.appendChild(opt);
+      });
+      select.value = view[item.key];
+      select.addEventListener('change', function () { setValue(item, select.value); });
+      field.appendChild(select);
+      value.remove();
+      label.style.marginBottom = '6px';
+      return field;
+    }
+
+    if (item.type === 'color') {
+      var color = document.createElement('input');
+      color.type = 'color';
+      color.value = view[item.key];
+      color.addEventListener('input', function () { setValue(item, color.value); });
+      field.appendChild(color);
+      return field;
+    }
+
+    if (item.type === 'text') {
+      var text2 = document.createElement('input');
+      text2.type = 'text';
+      text2.id = 'f-' + item.key;
+      text2.value = view[item.key];
+      text2.addEventListener('input', function () { setValue(item, text2.value); });
+      field.appendChild(text2);
+      return field;
+    }
+
+    if (item.type === 'toggle') {
+      var seg = document.createElement('div');
+      seg.className = 'seg';
+      [['On', true], ['Off', false]].forEach(function (option) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = option[0];
+        button.setAttribute('aria-pressed', String(!!view[item.key] === option[1]));
+        button.addEventListener('click', function () { setValue(item, option[1]); });
+        seg.appendChild(button);
+      });
+      field.appendChild(seg);
+      value.remove();
+      return field;
+    }
+
+    var slider = document.createElement('input');
+    slider.type = 'range';
+    slider.id = 'f-' + item.key;
+    slider.min = item.min; slider.max = item.max; slider.step = item.step;
+    slider.value = view[item.key];
+    slider.addEventListener('input', function () { setValue(item, slider.value); });
+
+    var number = document.createElement('input');
+    number.type = 'number';
+    number.min = item.min; number.max = item.max; number.step = item.step;
+    number.value = view[item.key];
+    number.addEventListener('change', function () { setValue(item, number.value); });
+
+    row.appendChild(slider);
+    row.appendChild(number);
+    field.appendChild(row);
+    field.dataset.slider = '1';
+    field.dataset.number = '1';
+    return field;
+  }
+
+  function format(item, value) {
+    var number = typeof value === 'boolean' ? (value ? 1 : 0) : Number(value);
+    var digits = item.digits !== undefined ? item.digits
+      : (item.step >= 1 ? 0 : item.step >= 0.1 ? 1 : 2);
+    return number.toFixed(digits) + (item.unit || '');
+  }
+
+  /* A style is a flat patch of view values. Applying it wholesale is what
+   * makes the Look switch a single click instead of seven separate sliders. */
+  function applyStyle(name) {
+    var preset = (window.HaloGlow && HaloGlow.STYLES && HaloGlow.STYLES[name]) || null;
+    if (!preset) return;
+    Object.keys(preset.params).forEach(function (key) { view[key] = preset.params[key]; });
+  }
+
+  function setValue(item, raw) {
+    var value = raw;
+    if (item.type === 'range') {
+      value = Math.min(item.max, Math.max(item.min, Number(raw)));
+      if (!Number.isFinite(value)) return;
+    } else if (item.type === 'toggle') {
+      value = raw === true || raw === 'true';
+    }
+    view[item.key] = value;
+    if (item.key === 'style') {
+      applyStyle(value);
+      buildControls();
+      apply();
+      return;
+    }
+    if (readout[item.key]) readout[item.key].textContent = item.type === 'range' ? format(item, value) : '';
+
+    var field = controlsEl.querySelector('[data-item="' + item.key + '"]');
+    if (field && field.dataset.slider) {
+      var slider = field.querySelector('input[type=range]');
+      var number = field.querySelector('input[type=number]');
+      if (slider && slider.value !== String(value)) slider.value = value;
+      if (number && document.activeElement !== number && number.value !== String(value)) number.value = value;
+    }
+    // Size changes the mask, so the distance field has to be rebuilt with it.
+    if (item.key === 'size' || item.key === 'bgMode' || item.key === 'bgFit' || item.key === 'palette') {
+      buildControls();
+    }
+    // A new aspect changes the frame, the drawing buffer and the mask all at
+    // once; without this the select moves and nothing else does.
+    if (item.key === 'aspect') {
+      fitFrame();
+      applyShape();
+    }
+    if (item.key === 'size') applyShape();
+    if (item.key === 'pingPong' && stage) stage.setPathPingPong(value === true || value === 'true');
+    apply();
+  }
+
+  function syncReadouts() {
+    SPEC.forEach(function (group) {
+      group.items.forEach(function (item) {
+        if (readout[item.key] && item.type === 'range') {
+          readout[item.key].textContent = format(item, view[item.key]);
+        }
+      });
+    });
+  }
+
+  /* ---------------------------------------------------------------- apply */
+
+  function paramPatch() {
+    return {
+      glow: view.glow, blur: view.blur, blurContrast: view.blurContrast,
+      dispersion: view.dispersion, sun: view.sun, streak: view.streak,
+      rings: view.rings, ghost: view.ghost, seed: view.seed,
+      flowSpeed: view.flowSpeed, exaggeration: view.exaggeration, drift: view.drift,
+      glowColor: view.glowColor, glowColor2: view.glowColor2,
+      adaptiveGlow: view.adaptiveGlow, palette: view.palette,
+      interior: view.interior, fillColor: view.fillColor,
+      fillStrength: (view.style === 'neon' || view.style === 'rim') ? 1 : view.fillStrength,
+      rainbow: view.rainbow, rainbowCycles: view.rainbowCycles, godrays: view.godrays,
+      light: [view.lightX / 100, 1 - view.lightY / 100],
+      position: { x: view.posX / 100, y: -view.posY / 100 },
+      background: {
+        mode: view.bgMode, color: view.bgColor, fit: view.bgFit,
+        image: stage ? stage.params.background.image : null,
+        aspect: stage ? stage.params.background.aspect : 1
+      }
+    };
+  }
+
+  var shapeTimer = null;
+
+  /* view.sourceType is the only truth about what the artwork should be; the
+   * payload for each branch lives in its own variable. Deriving the request
+   * from the previous shape instead is what makes the Source switch look like
+   * it did nothing. */
+  function currentShape() {
+    if (view.sourceType === 'text') {
+      return { type: 'text', text: view.sourceText || 'AURA', size: view.size };
+    }
+    if (view.sourceType === 'svg' && glyphText) {
+      return { type: 'svg', svgText: glyphText, size: view.size };
+    }
+    if (uploadedImage) {
+      return { type: 'svg', image: uploadedImage, svgText: null, size: view.size };
+    }
+    return { type: 'svg', svgText: glyphText, size: view.size };
+  }
+
+  function applyShape() {
+    if (!stage) return;
+    clearTimeout(shapeTimer);
+    shapeTimer = setTimeout(function () {
+      busy_(true, 'rebuilding distance field…');
+      stage.setSource(currentShape()).then(function () {
+        busy_(false);
+        needsDraw = true;
+      }, function (error) {
+        fail(error.message);
+      });
+    }, 60);
+  }
+
+  function apply() {
+    if (!stage) return;
+    var before = stage.params.blur;
+    stage.setParams(paramPatch());
+    if (stage.params.blur !== before) stage.params.blurDirty = true;
+    needsDraw = true;
+    syncReadouts();
+  }
+
+  function handleAction(id) {
+    if (id === 'randomize') {
+      view.seed = Math.round(Math.random() * 1200) / 100;
+      view.glow = Number((0.92 + Math.random() * 0.76).toFixed(2));
+      view.blur = Number((0.038 + Math.random() * 0.052).toFixed(3));
+      view.blurContrast = Number((0.65 + Math.random() * 0.90).toFixed(2));
+      view.dispersion = Number((0.002 + Math.random() * 0.006).toFixed(4));
+      view.sun = Number((0.78 + Math.random() * 0.68).toFixed(2));
+      view.streak = Number((0.48 + Math.random() * 0.92).toFixed(2));
+      view.rings = Number((0.46 + Math.random() * 0.74).toFixed(2));
+      view.ghost = Number((0.30 + Math.random() * 0.82).toFixed(2));
+      view.lightX = Number((42 + Math.random() * 14).toFixed(1));
+      view.lightY = Number((42 + Math.random() * 14).toFixed(1));
+      view.rainbowCycles = Number((0.6 + Math.random() * 2.6).toFixed(1));
+      rebuildControls();
+    } else if (id === 'reset') {
+      Object.assign(view, JSON.parse(JSON.stringify(INITIAL)));
+      rebuildControls();
+    } else if (id === 'export') {
+      exportPNG();
+    } else if (id === 'exportVideo') {
+      exportVideo();
+    } else if (id === 'toggleDraw') {
+      if (drawing) {
+        // Committing happens here, not on pointerup, so a route can be built
+        // from several strokes and only then handed to the renderer.
+        var route = guidePoints();
+        if (stage) {
+          if (route && route.length >= 2) {
+            stage.setPath(route);
+            stage.setPathPingPong(view.pingPong);
+          } else {
+            stage.clearPath();
+          }
+        }
+        strokes = [];
+        setDrawing(false);
+      } else {
+        strokes = [];
+        setDrawing(true);
+      }
+      rebuildControls();
+    } else if (id === 'clearPath') {
+      if (stage) stage.clearPath();
+      strokes = [];
+      setDrawing(false);
+      rebuildControls();
+    } else if (id === 'uploadBackground') {
+      backgroundFile.click();
+    }
+  }
+
+  function rebuildControls() {
+    buildControls();
+    syncReadouts();
+    apply();
+    applyShape();
+  }
+
+  /* --------------------------------------------------------------- canvas */
+
+  function fitFrame() {
+    var box = document.querySelector('.stage-body');
+    var ratio = view.aspect.split(':').map(Number);
+    var target = ratio[0] / ratio[1];
+    var available = { w: box.clientWidth, h: box.clientHeight };
+    var width = Math.min(available.w, available.h * target);
+    var height = width / target;
+    frame.style.width = Math.max(40, Math.floor(width)) + 'px';
+    frame.style.height = Math.max(40, Math.floor(height)) + 'px';
+    resizeCanvas();
+  }
+
+  var resizeTimer = null;
+  function resizeCanvas() {
+    if (!stage || busy) return;
+    var rect = frame.getBoundingClientRect();
+    var dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1.5), 2);
+    var scale = Math.min(dpr, 4096 / Math.max(rect.width, rect.height));
+    var width = Math.max(2, Math.floor(rect.width * scale));
+    var height = Math.max(2, Math.floor(rect.height * scale));
+    if (canvas.width === width && canvas.height === height) return;
+    stage.resize(width, height);
+    // The field is stored at its own resolution, but the mask was painted for
+    // the old aspect; a shape rebuild keeps the geometry honest.
+    applyShape();
+  }
+
+  var dragging = null;
+  var drawingPointer = null;
+
+  /* uv from a pointer event. Deliberately not clamped: a path that leaves the
+   * frame is how the light gets placed outside the artwork on purpose. */
+  function toUv(event) {
+    var rect = frame.getBoundingClientRect();
+    return [
+      (event.clientX - rect.left) / Math.max(rect.width, 1),
+      (event.clientY - rect.top) / Math.max(rect.height, 1)
+    ];
+  }
+
+  function setDrawing(on) {
+    drawing = on;
+    frame.classList.toggle('drawing', on);
+    if (!on) activeStroke = null;
+    needsDraw = true;
+  }
+
+  /* Every point drawn so far, flattened across strokes. The renderer resamples
+   * by arc length, so the gaps between separate strokes are just longer
+   * straight runs - which is what you want when a route is drawn in pieces. */
+  function guidePoints() {
+    if (drawing && strokes.length) {
+      var all = [];
+      strokes.forEach(function (stroke) { all = all.concat(stroke); });
+      return all;
+    }
+    return samplePreviewPath();
+  }
+
+  frame.addEventListener('pointerdown', function (event) {
+    if (busy || event.button !== 0) return;
+    if (drawing) {
+      drawingPointer = event.pointerId;
+      // Every press is a new stroke that is kept, so several separate sweeps
+      // can be combined into one route.
+      activeStroke = [toUv(event)];
+      strokes.push(activeStroke);
+      frame.setPointerCapture(event.pointerId);
+      needsDraw = true;
+      return;
+    }
+    dragging = event.pointerId;
+    frame.setPointerCapture(event.pointerId);
+    moveLight(event);
+  });
+
+  frame.addEventListener('pointermove', function (event) {
+    if (event.pointerId === drawingPointer && activeStroke) {
+      var p = toUv(event);
+      var last = activeStroke[activeStroke.length - 1];
+      // Skip sub-pixel jitter so the resampler is not handed 400 near-identical points.
+      if (!last || Math.hypot(p[0] - last[0], p[1] - last[1]) > 0.004) {
+        activeStroke.push(p);
+        needsDraw = true;
+      }
+      return;
+    }
+    if (event.pointerId === dragging) moveLight(event);
+  });
+
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(function (name) {
+    frame.addEventListener(name, function (event) {
+      if (event.pointerId === drawingPointer) {
+        // Releasing ends one stroke, not the whole drawing: the strokes stay on
+        // screen and the light only starts walking the route once it is finished.
+        drawingPointer = null;
+        activeStroke = null;
+        needsDraw = true;
+      }
+      if (event.pointerId === dragging) dragging = null;
+    });
+  });
+
+  /* Guide layer: the drawn path, plus where the light is on it right now. */
+  function drawOverlay(seconds) {
+    var rect = frame.getBoundingClientRect();
+    var dpr = Math.min(Math.max(window.devicePixelRatio || 1, 1.5), 2);
+    var w = Math.max(1, Math.round(rect.width * dpr));
+    var h = Math.max(1, Math.round(rect.height * dpr));
+    if (guideCanvas.width !== w || guideCanvas.height !== h) {
+      guideCanvas.width = w;
+      guideCanvas.height = h;
+    }
+    var ctx = guideCtx;
+    ctx.clearRect(0, 0, w, h);
+
+    var points = guidePoints();
+
+    if (points && points.length >= 2) {
+      // Path points are in GL uv, where v=0 is the bottom; the 2D guide canvas
+      // has y=0 at the top. Flipping here is the only place it has to happen.
+      var toScreen = function (p) { return [p[0] * w, (1 - p[1]) * h]; };
+      ctx.lineWidth = Math.max(1.5, dpr * 1.25);
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      // Dashed underlay keeps the path readable over a bright glow.
+      ctx.setLineDash([dpr * 5, dpr * 5]);
+      ctx.strokeStyle = 'rgba(6,18,28,0.55)';
+      ctx.beginPath();
+      points.forEach(function (p, i) {
+        var s = toScreen(p);
+        if (i === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.strokeStyle = drawing ? 'rgba(143,209,255,0.95)' : 'rgba(255,255,255,0.62)';
+      ctx.beginPath();
+      points.forEach(function (p, i) {
+        var s = toScreen(p);
+        if (i === 0) ctx.moveTo(s[0], s[1]); else ctx.lineTo(s[0], s[1]);
+      });
+      ctx.stroke();
+    }
+
+    // The light head, wherever it currently is. lightAt takes seconds, the
+    // same clock the shader's uTime runs on.
+    var head = stage ? stage.lightAt(sceneTime * 0.001)
+      : [view.lightX / 100, 1 - view.lightY / 100];
+    var hx = head[0] * w, hy = (1 - head[1]) * h;
+    var radius = dpr * 7;
+    ctx.beginPath();
+    ctx.arc(hx, hy, radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.92)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(hx, hy, radius * 2.1, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(143,209,255,0.55)';
+    ctx.lineWidth = Math.max(1, dpr);
+    ctx.stroke();
+  }
+
+  /* The renderer's path is resampled for the GPU, so read the same samples
+   * back rather than keeping a second copy in sync. */
+  function samplePreviewPath() {
+    if (!stage || !stage.hasPath()) return null;
+    return stage.pathPoints();
+  }
+
+  function moveLight(event) {
+    var rect = frame.getBoundingClientRect();
+    view.lightX = Math.round(((event.clientX - rect.left) / Math.max(rect.width, 1)) * 1000) / 10;
+    view.lightY = Math.round(((event.clientY - rect.top) / Math.max(rect.height, 1)) * 1000) / 10;
+    var field = controlsEl.querySelector('[data-item="lightX"]');
+    var fieldY = controlsEl.querySelector('[data-item="lightY"]');
+    if (field) {
+      field.querySelector('input[type=range]').value = view.lightX;
+      field.querySelector('input[type=number]').value = view.lightX;
+    }
+    if (fieldY) {
+      fieldY.querySelector('input[type=range]').value = view.lightY;
+      fieldY.querySelector('input[type=number]').value = view.lightY;
+    }
+    apply();
+  }
+
+  /* --------------------------------------------------------------- export */
+
+  /* The anchor has to be in the document for its download attribute to be
+   * honoured; detached, the file lands under a mangled name. The timestamp
+   * keeps repeat exports from colliding - a collision sends the browser down
+   * a naming path that ignores `download` entirely.
+   * No rel="noopener" here: on a blob: URL it makes Chromium treat the click
+   * as a navigation and nothing is saved.
+   * The auto-click is best-effort. A browser that has already downloaded
+   * several files from a page silently refuses further ones, so the finished
+   * file is always also offered as a visible link. */
+  function offerDownload(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.className = 'download-item';
+    link.textContent = '⬇ ' + filename.replace(/^halo-/, '');
+    downloadsEl.insertBefore(link, downloadsEl.firstChild);
+    while (downloadsEl.children.length > 3) {
+      var stale = downloadsEl.lastChild;
+      URL.revokeObjectURL(stale.href);
+      downloadsEl.removeChild(stale);
+    }
+  }
+
+  function downloadBlob(blob, filename) {
+    var now = new Date();
+    var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+    var stamp = pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds());
+    var named = filename.replace(/(\.[^.]+)$/, '-' + stamp + '$1');
+    offerDownload(blob, named);
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = named;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(function () {
+      if (link.parentNode) link.parentNode.removeChild(link);
+      URL.revokeObjectURL(link.href);
+    }, 5000);
+  }
+
+  function exportPNG() {
+    if (!stage || busy) return;
+    var size = ASPECTS[view.aspect];
+    var previous = { width: canvas.width, height: canvas.height, time: sceneTime };
+    busy_(true, 'rendering at ' + size[0] + ' × ' + size[1] + '…');
+    document.body.style.cursor = 'progress';
+
+    canvas.width = size[0];
+    canvas.height = size[1];
+    var restore = function () {
+      canvas.width = previous.width;
+      canvas.height = previous.height;
+      sceneTime = previous.time;
+      busy = false;
+      document.body.style.cursor = '';
+      busy_(false);
+      needsDraw = true;
+    };
+
+    stage.rebuild(2048).then(function () {
+      stage.draw(sceneTime);
+      return stage.toPNG();
+    }).then(function (blob) {
+      downloadBlob(blob, 'halo-' + view.aspect.replace(':', 'x') + '-' + size[0] + 'x' + size[1] + '.png');
+      setStatus(blob.size > 1024 ? Math.round(blob.size / 1024) + ' KB exported' : 'exported');
+      restore();
+    }).catch(function (error) {
+      restore();
+      fail('Export failed: ' + error.message);
+    });
+  }
+
+  /* captureStream(0) creates a stream that only advances when a frame is pushed
+   * by hand, so the encoder runs as fast as the renderer can feed it instead of
+   * in real time. The cost is that each frame must be handed over one at a time
+   * and yielded to, or the encoder silently drops them. */
+  var videoJob = null;
+
+  function exportVideo() {
+    if (!stage || busy) return;
+    if (!videoSupport) { fail('This browser cannot encode video.'); return; }
+
+    var mime = videoSupport[0];
+    var extension = videoSupport[1];
+    var size = ASPECTS[view.aspect];
+    var seconds = Number(view.videoDuration) || 5;
+    var total = seconds * VIDEO_FPS;
+    var previous = { width: canvas.width, height: canvas.height, time: sceneTime };
+    var startedAt = performance.now();
+    var stream, recorder, chunks, finished, cancelled = false;
+
+    var restore = function () {
+      canvas.width = previous.width;
+      canvas.height = previous.height;
+      sceneTime = previous.time;
+      busy = false;
+      document.body.style.cursor = '';
+      videoJob = null;
+      busy_(false);
+      needsDraw = true;
+      if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+    };
+
+    videoCancel.onclick = function () { cancelled = true; };
+    busy = true;
+    document.body.style.cursor = 'progress';
+    overlayText.textContent = 'Preparing video…';
+    showVideoProgress(0);
+
+    try {
+      canvas.width = size[0];
+      canvas.height = size[1];
+      stream = canvas.captureStream(0);
+      var track = stream.getVideoTracks()[0];
+      if (!track) throw new Error('This canvas cannot be captured.');
+      recorder = new MediaRecorder(stream, {
+        mimeType: mime,
+        // Roughly 0.11 bits per pixel per frame: enough for a soft glow, which
+        // is exactly where banding shows up first.
+        videoBitsPerSecond: Math.round(size[0] * size[1] * VIDEO_FPS * 0.12)
+      });
+      chunks = [];
+      recorder.ondataavailable = function (event) {
+        if (event.data && event.data.size) chunks.push(event.data);
+      };
+      finished = new Promise(function (resolve) { recorder.onstop = resolve; });
+      // A timeslice makes the encoder flush roughly once per second. Without it
+      // the renderer outruns the encoder and whole fragments are dropped: a
+      // 15s export landed 414 of 451 frames before this.
+      recorder.start(1000);
+    } catch (error) {
+      restore();
+      fail('Video export failed to start: ' + error.message);
+      return;
+    }
+
+    stage.rebuild(2048).then(function () {
+      /* MediaRecorder timestamps frames by wall clock, so a renderer that
+       * outruns the encoder produces a file that is complete and far too
+       * short - 151 frames pushed in 1.2s came out as a 1.2s video. Pacing
+       * each frame to its slot is what makes the exported length real. */
+      var origin = performance.now();
+      var frame = 0;
+      function next() {
+        if (cancelled) return Promise.resolve(false);
+        var due = origin + (frame / VIDEO_FPS) * 1000;
+        var wait = due - performance.now();
+        if (wait > 1) {
+          return new Promise(function (resolve) {
+            setTimeout(function () { resolve(next()); }, Math.min(wait, 250));
+          });
+        }
+        sceneTime = previous.time + (frame / VIDEO_FPS) * 1000;
+        stage.draw(sceneTime);
+        track.requestFrame();
+        frame += 1;
+        showVideoProgress(frame / total);
+        if (frame > total) return Promise.resolve(true);
+        return Promise.resolve(next());
+      }
+      return next();
+    }).then(function (completed) {
+      recorder.stop();
+      return finished.then(function () { return completed; });
+    }).then(function (completed) {
+      if (!completed) {
+        restore();
+        setStatus('video cancelled');
+        return;
+      }
+      var blob = new Blob(chunks, { type: mime.split(';')[0] });
+      if (!blob.size) throw new Error('The encoder produced an empty file.');
+      downloadBlob(blob, 'halo-' + view.aspect.replace(':', 'x') + '-' + size[0] + 'x' + size[1]
+        + '-' + seconds + 's.' + extension);
+      setStatus(seconds + 's ' + extension.toUpperCase() + ' · '
+        + (blob.size > 1048576 ? (blob.size / 1048576).toFixed(1) + ' MB' : Math.round(blob.size / 1024) + ' KB')
+        + ' · ' + ((performance.now() - startedAt) / 1000).toFixed(1) + 's');
+      restore();
+    }).catch(function (error) {
+      try { if (recorder && recorder.state !== 'inactive') recorder.stop(); } catch (stopError) { /* already stopped */ }
+      restore();
+      fail('Video export failed: ' + error.message);
+    });
+  }
+
+  /* ----------------------------------------------------------- svg upload */
+
+  svgFile.addEventListener('change', function (event) {
+    var file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file || !stage) return;
+    var version = ++uploadVersion;
+    var reader = new FileReader();
+    reader.onload = function () {
+      if (version !== uploadVersion) return;
+      var svgText = String(reader.result);
+      busy_(true, 'reading artwork…');
+      // Force a fresh decode even when the text repeats a previous upload.
+      var blob = new Blob([svgText], { type: 'image/svg+xml' });
+      var image = new Image();
+      image.onload = function () {
+        if (version !== uploadVersion) return;
+        uploadedImage = image;
+        view.sourceType = 'svg';
+        buildControls();
+        applyShape();
+        setStatus(file.name);
+      };
+      image.onerror = function () { busy_(false); fail('Could not decode that SVG.'); };
+      image.src = URL.createObjectURL(blob);
+    };
+    reader.onerror = function () { busy_(false); fail('Could not read that file.'); };
+    reader.readAsText(file);
+  });
+
+  /* ----------------------------------------------------------------- loop */
+
+  backgroundFile.addEventListener('change', function (event) {
+    var file = event.target.files && event.target.files[0];
+    event.target.value = '';
+    if (!file || !stage) return;
+    var url = URL.createObjectURL(file);
+    var image = new Image();
+    image.onload = function () {
+      stage.setBackgroundImage(image);
+      view.bgMode = 'image';
+      buildControls();
+      apply();
+      setStatus(file.name);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    };
+    image.onerror = function () {
+      URL.revokeObjectURL(url);
+      fail('Could not decode that image.');
+    };
+    image.src = url;
+  });
+
+  function loop(now) {
+    requestAnimationFrame(loop);
+    if (!stage || busy) return;
+    if (view.animate) {
+      if (lastFrame !== null) sceneTime += (now - lastFrame) * 0.001 * 1000;
+      needsDraw = true;
+    }
+    lastFrame = now;
+    drawOverlay(sceneTime * 0.001);
+    if (!needsDraw) return;
+    needsDraw = false;
+    stage.draw(sceneTime);
+  }
+
+  /* ----------------------------------------------------------------- boot */
+
+  function loadGlyph() {
+    return fetch('../assets/glyph.svg').then(function (r) {
+      if (!r.ok) throw new Error('not found');
+      return r.text();
+    }).catch(function () {
+      if (!INLINE_GLYPH) throw new Error('The inline glyph is missing from this page.');
+      return INLINE_GLYPH;
+    });
+  }
+
+  function start() {
+    try {
+      stage = HaloGlow.createStage(canvas, { params: paramPatch() });
+    } catch (error) {
+      fail(error.message);
+      return;
+    }
+    setStatus(stage.usesFloatTargets ? 'WebGL2 · 16F targets' : 'WebGL2 · 8-bit targets');
+    buildControls();
+    syncReadouts();
+    fitFrame();
+
+    var observer = new ResizeObserver(function () {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(function () { fitFrame(); resizeCanvas(); }, 120);
+    });
+    observer.observe(document.querySelector('.stage-body'));
+    window.addEventListener('resize', function () { fitFrame(); });
+
+    loadGlyph().then(function (svgText) {
+      glyphText = svgText;
+      busy_(true, 'building distance field…');
+      stage.setPathPingPong(view.pingPong);
+      return stage.setSource(currentShape());
+    }).then(function () {
+      busy_(false);
+      needsDraw = true;
+      requestAnimationFrame(loop);
+    }).catch(function (error) {
+      busy_(false);
+      fail(error.message);
+    });
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+</script>
+</body>
+</html>
