@@ -33,3 +33,19 @@ which character appears.
 
 Open `asciiflow/examples/ascii-fluid.html` by double-clicking it. It runs from
 `file://` — no server, no install.
+
+## [unfazed wave](unfazed%20wave/)
+
+The `wave` shader from [OpenShaders](https://openshaders.com/@unfazed), in all
+four forms its author published — WebGL2 and WebGPU, each as a plain JS module
+and as a React component. The files in `src/` are byte-for-byte as published.
+
+- 78 folded glow layers, tinted through Oklch
+- A second pass resamples the field through a travelling liquid flow
+- Dark and light themes, eased
+- Blue-noise dithered so the gradients do not band
+
+Open `unfazed wave/examples/wave.html` by double-clicking it. It runs from
+`file://` — no server, no install.
+
+Documentation lives in [`unfazed wave/SKILL.md`](unfazed%20wave/SKILL.md).
