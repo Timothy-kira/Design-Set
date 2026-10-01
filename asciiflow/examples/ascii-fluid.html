@@ -1,0 +1,542 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>ASCII Fluid</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #75b6f8; }
+  body {
+    /* No font stack on the page: the glyph atlas is measured at runtime, so
+       the ramp adapts to whatever monospace the machine actually resolves. */
+    touch-action: none; overscroll-behavior: none;
+  }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #hint {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace;
+    color: rgba(255,255,255,.72); background: rgba(20,40,70,.28);
+    padding: 6px 14px; border-radius: 999px; pointer-events: none;
+    transition: opacity .8s; white-space: nowrap;
+  }
+  #hint.gone { opacity: 0; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">拖动搅动 · 点击释放染料 · C 清空</div>
+<script>
+(function () {
+  'use strict';
+
+  var canvas = document.getElementById('c');
+  var ctx = canvas.getContext('2d', { alpha: false });
+  var hint = document.getElementById('hint');
+
+  /* ------------------------------------------------------------- tuning */
+
+  var CFG = {
+    columns: 100,       // target grid width; cell size is derived from it
+    cellMin: 6,
+    cellMax: 18,
+    viscosity: 0.16,    // velocity diffusion
+    densityDiffuse: 0.0,
+    densityDissipate: 0.996,
+    velocityDissipate: 0.999,
+    pressureIters: 14,
+    // Velocities live in grid cells per second, so this is cells/s per cell
+    // of pointer travel - single digits, not the hundreds you would use if
+    // the field were normalised to 0..1. Too large and the very first drag
+    // flings the dye off-grid and it all clamps away into the border.
+    // Momentum matters far more than ink here. Too little force and a drag
+    // just deposits a straight, static band; enough force and the existing
+    // plume gets grabbed and torn into vortices, which is the whole effect.
+    force: 15,
+    velCap: 70,         // one event can never fling the field off-grid
+    inkPerCell: 0.015,  // ink laid down per cell of travel, not per event
+    hoverSwirl: 4.0,    // gentle vortex under a pointer that is only hovering
+    hoverRadius: 8,
+    ambient: 0.55,      // idle updraft so the piece is never fully dead
+    ambientDensity: 0.030,
+    // Cross-stream shear at the emitter. A buoyant column with purely vertical
+    // flow stays a smooth slab; the shear is what the advection solver folds
+    // into filaments, curls and holes.
+    swirl: 28,
+    dt: 1 / 60
+  };
+
+  /* ------------------------------------------------------------- fields */
+
+  var W = 0, H = 0, cellW = 0, cellH = 0, dpr = 1;
+  var u, v, u0, v0, dens, dens0, press, div;
+
+  function alloc(w, h) {
+    W = w; H = h;
+    var n = W * H;
+    u = new Float32Array(n); v = new Float32Array(n);
+    u0 = new Float32Array(n); v0 = new Float32Array(n);
+    dens = new Float32Array(n); dens0 = new Float32Array(n);
+    press = new Float32Array(n); div = new Float32Array(n);
+  }
+
+  function idx(x, y) { return y * W + x; }
+
+  function sample(field, x, y) {
+    x = x < 0 ? 0 : (x > W - 1.001 ? W - 1.001 : x);
+    y = y < 0 ? 0 : (y > H - 1.001 ? H - 1.001 : y);
+    var i0 = x | 0, j0 = y | 0;
+    var i1 = i0 + 1 < W ? i0 + 1 : i0;
+    var j1 = j0 + 1 < H ? j0 + 1 : j0;
+    var fx = x - i0, fy = y - j0;
+    var a = field[j0 * W + i0], b = field[j0 * W + i1];
+    var c = field[j1 * W + i0], d = field[j1 * W + i1];
+    return (a + (b - a) * fx) * (1 - fy) + (c + (d - c) * fx) * fy;
+  }
+
+  /* ---------------------------------------------------------- the solver */
+
+  function diffuse(field, tmp, rate) {
+    if (rate <= 0) return;
+    var k = rate * 0.0006, inv = 1 / (1 + 4 * k);
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var i = idx(x, y);
+        var l = field[y * W + (x > 0 ? x - 1 : 0)];
+        var r = field[y * W + (x < W - 1 ? x + 1 : W - 1)];
+        var t = field[(y > 0 ? y - 1 : 0) * W + x];
+        var b = field[(y < H - 1 ? y + 1 : H - 1) * W + x];
+        tmp[i] = (field[i] + k * (l + r + t + b)) * inv;
+      }
+    }
+    field.set(tmp);
+  }
+
+  /* Make the velocity field divergence-free, so the fluid swirls instead of
+   * simply spreading outward. Jacobi relaxation on the pressure Poisson
+   * equation - the standard stable-fluids step. */
+  function project() {
+    var x, y, i;
+    for (y = 0; y < H; y++) {
+      for (x = 0; x < W; x++) {
+        i = idx(x, y);
+        var l = u[y * W + (x > 0 ? x - 1 : 0)];
+        var r = u[y * W + (x < W - 1 ? x + 1 : W - 1)];
+        var t = v[(y > 0 ? y - 1 : 0) * W + x];
+        var b = v[(y < H - 1 ? y + 1 : H - 1) * W + x];
+        div[i] = -0.5 * (r - l + b - t);
+        press[i] = 0;
+      }
+    }
+    for (var k = 0; k < CFG.pressureIters; k++) {
+      for (y = 0; y < H; y++) {
+        for (x = 0; x < W; x++) {
+          i = idx(x, y);
+          var pl = press[y * W + (x > 0 ? x - 1 : 0)];
+          var pr = press[y * W + (x < W - 1 ? x + 1 : W - 1)];
+          var pt = press[(y > 0 ? y - 1 : 0) * W + x];
+          var pb = press[(y < H - 1 ? y + 1 : H - 1) * W + x];
+          press[i] = (div[i] + pl + pr + pt + pb) * 0.25;
+        }
+      }
+    }
+    for (y = 0; y < H; y++) {
+      for (x = 0; x < W; x++) {
+        i = idx(x, y);
+        var vl = press[y * W + (x > 0 ? x - 1 : 0)];
+        var vr = press[y * W + (x < W - 1 ? x + 1 : W - 1)];
+        var vt = press[(y > 0 ? y - 1 : 0) * W + x];
+        var vb = press[(y < H - 1 ? y + 1 : H - 1) * W + x];
+        u[i] -= 0.5 * (vr - vl);
+        v[i] -= 0.5 * (vb - vt);
+      }
+    }
+  }
+
+  /* Semi-Lagrangian advection: trace each cell backwards along the velocity
+   * and resample. Unconditionally stable, which is what lets the timestep stay
+   * fixed on a 60 Hz display. */
+  function advect(dst, src, velX, velY, dt) {
+    for (var y = 0; y < H; y++) {
+      for (var x = 0; x < W; x++) {
+        var i = idx(x, y);
+        var sx = x - velX[i] * dt;
+        var sy = y - velY[i] * dt;
+        dst[i] = sample(src, sx, sy);
+      }
+    }
+  }
+
+  var simTime = 0;
+
+  function step(dt) {
+    simTime += dt;
+    // Forcing runs on simulated time, not the wall clock. The solver advances
+    // in fixed dt steps, so a source driven by performance.now() runs faster
+    // than the physics on a slow machine and its structure averages away into
+    // a uniform blob. Sim time keeps the piece identical at any frame rate.
+    var t = simTime;
+    var ex = W * 0.5 + Math.sin(t * 0.23) * W * 0.13;
+    var ey = H * 0.70 + Math.sin(t * 0.17 + 1.7) * H * 0.04;
+    var rx = Math.max(4, W * 0.24), ry = Math.max(3, H * 0.26);
+    var x0 = Math.max(0, (ex - rx * 1.6) | 0), x1 = Math.min(W - 1, (ex + rx * 1.6) | 0);
+    var y0 = Math.max(0, (ey - ry * 1.6) | 0), y1 = Math.min(H - 1, (ey + ry * 1.6) | 0);
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var dx = (x - ex) / rx, dy = (y - ey) / ry;
+        var q = 1 - dx * dx - dy * dy;
+        if (q <= 0) continue;
+        q *= q;
+        // A clean ellipse emits a clean ellipse. The reference blob has a
+        // ragged, clumped edge, which is what this wobble buys.
+        q *= 0.55 + 0.45 * Math.sin(x * 0.83 + t * 1.9) * Math.sin(y * 1.27 - t * 1.3 + 0.7);
+        if (q <= 0) continue;
+        var i = idx(x, y);
+        // Biased upward: a symmetric sine averages out to zero and the plume
+        // never gets away from the emitter.
+        var lift = 0.8 + 0.35 * Math.sin(t * 0.9 + x * 0.4);
+        v[i] += lift * CFG.ambient * dt * q;
+        dens[i] += CFG.ambientDensity * q;
+
+        var ang = Math.atan2(dy, dx);
+        u[i] += CFG.swirl * q * Math.sin(ang * 2.0 + t * 0.7) * dt;
+        u[i] += CFG.swirl * 0.7 * q * Math.sin(dy * 2.2 + t * 0.5) * dt;
+        v[i] += CFG.swirl * 0.5 * q * Math.cos(ang * 2.0 - t * 0.9) * dt;
+      }
+    }
+
+    diffuse(u, u0, CFG.viscosity);
+    diffuse(v, v0, CFG.viscosity);
+    project();
+
+    advect(u0, u, u, v, dt); u.set(u0);
+    advect(v0, v, u, v, dt); v.set(v0);
+    project();
+
+    if (CFG.densityDiffuse > 0) {
+      diffuse(dens, dens0, CFG.densityDiffuse);
+    } else {
+      dens0.set(dens);
+    }
+    advect(dens0, dens, u, v, dt);
+    dens.set(dens0);
+
+    // Dissipation, clamped so nothing ever goes negative.
+    var vd = CFG.velocityDissipate, dd = CFG.densityDissipate;
+    for (var k = 0; k < dens.length; k++) {
+      u[k] *= vd; v[k] *= vd;
+      dens[k] *= dd;
+      if (dens[k] < 0.0004) dens[k] = 0;
+    }
+  }
+
+  /* ------------------------------------------------------------- glyphs */
+
+  var RAMP_CHARS = ' ACEFGHIJKLMNOPQRSTUVWXYZ';
+  var atlas = null;      // one strip, all glyphs side by side
+  var ramp = [];         // glyph indices ordered by ink coverage
+  var glyphW = 0, glyphH = 0;
+
+  /* Ink coverage is measured, not assumed. A ramp hand-picked for one font
+   * stops being monotonic in another, and the field then reads as noise
+   * instead of as density. */
+  function buildRamp() {
+    // Measure in a box scaled to the font, so a large cell on a hi-dpi screen
+    // cannot clip the glyph and under-report its ink.
+    var size = Math.max(6, Math.round(glyphH * 0.74));
+    var pw = Math.ceil(size * 2.2), ph = Math.ceil(size * 2.0);
+    var probe = document.createElement('canvas');
+    probe.width = pw; probe.height = ph;
+    var pctx = probe.getContext('2d', { willReadFrequently: true });
+    var family = 'ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace';
+    pctx.font = size + 'px ' + family;
+    pctx.textAlign = 'center';
+    pctx.textBaseline = 'middle';
+    pctx.fillStyle = '#fff';
+
+    var measured = [];
+    for (var i = 0; i < RAMP_CHARS.length; i++) {
+      pctx.clearRect(0, 0, pw, ph);
+      pctx.fillText(RAMP_CHARS[i], pw / 2, ph / 2);
+      var d = pctx.getImageData(0, 0, pw, ph).data;
+      var sum = 0;
+      for (var p = 3; p < d.length; p += 4) sum += d[p];
+      measured.push({ ch: RAMP_CHARS[i], ink: sum / (pw * ph * 255) });
+    }
+    measured.sort(function (a, b) { return a.ink - b.ink; });
+
+    ramp = [];
+    atlas = document.createElement('canvas');
+    atlas.width = glyphW * measured.length;
+    atlas.height = glyphH;
+    var actx = atlas.getContext('2d');
+    actx.clearRect(0, 0, atlas.width, atlas.height);
+    actx.font = size + 'px ' + family;
+    actx.textAlign = 'center';
+    actx.textBaseline = 'middle';
+    actx.fillStyle = '#fff';
+    for (var m = 0; m < measured.length; m++) {
+      actx.fillText(measured[m].ch, m * glyphW + glyphW / 2, glyphH / 2);
+      ramp.push(m);
+    }
+  }
+
+  /* -------------------------------------------------------------- layout */
+
+  var primed = false;
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var cssW = window.innerWidth;
+    var cssH = window.innerHeight;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+
+    var target = CFG.columns;
+    cellW = Math.max(CFG.cellMin, Math.min(CFG.cellMax, Math.round(cssW / target)));
+    glyphW = cellW * dpr;
+    // Wider than the monospace advance on purpose: the reference look depends
+    // on the gaps between characters, and a tightly packed grid reads as a
+    // texture rather than as text.
+    glyphH = Math.round(glyphW * 1.15);
+    cellH = glyphH;
+
+    var cols = Math.max(8, Math.floor(canvas.width / glyphW));
+    var rows = Math.max(8, Math.floor(canvas.height / glyphH));
+    // Render into a whole number of cells so the right/bottom edge is clean.
+    canvas.width = cols * glyphW;
+    canvas.height = rows * glyphH;
+    canvas.style.width = (canvas.width / dpr) + 'px';
+    canvas.style.height = (canvas.height / dpr) + 'px';
+
+    buildRamp();
+    alloc(cols, rows);
+
+    // Open on a formed mass rather than an empty field: the plume needs a few
+    // seconds of simulated time to develop, and a blank blue rectangle is a
+    // poor first frame.
+    if (!primed) {
+      primed = true;
+      for (var s = 0; s < 70; s++) step(CFG.dt);
+      render();
+    }
+
+    ctx.fillStyle = 'rgb(' + BG[0] + ',' + BG[1] + ',' + BG[2] + ')';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  var primed = false;
+
+  /* --------------------------------------------------------------- input */
+
+  var pointer = { down: false, id: null, x: 0, y: 0, px: 0, py: 0, moved: false };
+
+  function toGrid(event) {
+    var rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) / rect.width * W,
+      y: (event.clientY - rect.top) / rect.height * H
+    };
+  }
+
+  /* A splat writes a smooth gaussian into the grid. Injecting density only at
+   * the exact pointer cell produces a dot that the solver immediately shreds;
+   * the falloff is what makes it behave like poured fluid. */
+  function splat(gx, gy, dx, dy, amount) {
+    var R = 3.2, r2 = R * R;
+    var x0 = Math.max(0, (gx - R) | 0), x1 = Math.min(W - 1, (gx + R) | 0);
+    var y0 = Math.max(0, (gy - R) | 0), y1 = Math.min(H - 1, (gy + R) | 0);
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var ex = x - gx, ey = y - gy;
+        var d2 = ex * ex + ey * ey;
+        if (d2 > r2) continue;
+        var w = 1 - d2 / r2;
+        w *= w;
+        var i = idx(x, y);
+        u[i] += dx * w;
+        v[i] += dy * w;
+        dens[i] += amount * w;
+      }
+    }
+  }
+
+  /* Lay ink along the segment the pointer actually travelled. Sampling only
+   * the endpoint leaves a dotted trail on a fast drag, and depositing per
+   * event rather than per unit of travel lets a slow, patient drag pump one
+   * cell up to a solid block - which is what turns the screen into a wall of
+   * characters. Total ink scales with distance, so a slow drag and a fast one
+   * lay down the same amount per pixel. */
+  function stroke(x0, y0, x1, y1, vx, vy, perCell) {
+    var dx = x1 - x0, dy = y1 - y0;
+    var dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 1e-4) { splat(x1, y1, vx, vy, perCell); return; }
+    var steps = Math.min(32, Math.max(1, Math.ceil(dist / 0.8)));
+    var share = perCell * dist / steps;
+    var svx = vx / steps, svy = vy / steps;
+    for (var s = 1; s <= steps; s++) {
+      var f = s / steps;
+      splat(x0 + dx * f, y0 + dy * f, svx, svy, share);
+    }
+  }
+
+  /* A light tangential swirl under a pointer that is only hovering. Circular
+   * flow is divergence-free, so it turns the ink near the cursor without
+   * collecting it: the piece looks like it noticed the pointer, and unlike a
+   * hover that paints it adds no ink at all. */
+  function hoverSwirl(gx, gy) {
+    var R = CFG.hoverRadius, r2 = R * R;
+    var x0 = Math.max(0, (gx - R) | 0), x1 = Math.min(W - 1, (gx + R) | 0);
+    var y0 = Math.max(0, (gy - R) | 0), y1 = Math.min(H - 1, (gy + R) | 0);
+    for (var y = y0; y <= y1; y++) {
+      for (var x = x0; x <= x1; x++) {
+        var ex = x - gx, ey = y - gy;
+        var d2 = ex * ex + ey * ey;
+        if (d2 > r2 || d2 < 1e-6) continue;
+        var d = Math.sqrt(d2);
+        var w = 1 - d2 / r2;
+        w *= w;
+        var i = idx(x, y);
+        u[i] -= CFG.hoverSwirl * w * ey / d * CFG.dt;
+        v[i] += CFG.hoverSwirl * w * ex / d * CFG.dt;
+      }
+    }
+  }
+
+  function onDown(event) {
+    var p = toGrid(event);
+    pointer.down = true; pointer.id = event.pointerId; pointer.moved = false;
+    pointer.x = pointer.px = p.x; pointer.y = pointer.py = p.y;
+    // A nudge, not a drop of paint.
+    splat(p.x, p.y, 0, 0, 0.18);
+    canvas.setPointerCapture && canvas.setPointerCapture(event.pointerId);
+    hideHint();
+  }
+
+  function onMove(event) {
+    var p = toGrid(event);
+    if (!pointer.down) {
+      hoverSwirl(p.x, p.y);
+      pointer.px = p.x; pointer.py = p.y;
+      pointer.x = p.x; pointer.y = p.y;
+      return;
+    }
+    var mx = p.x - pointer.px, my = p.y - pointer.py;
+    var vx = mx * CFG.force, vy = my * CFG.force;
+    if (vx > CFG.velCap) vx = CFG.velCap; else if (vx < -CFG.velCap) vx = -CFG.velCap;
+    if (vy > CFG.velCap) vy = CFG.velCap; else if (vy < -CFG.velCap) vy = -CFG.velCap;
+    if (mx || my) {
+      pointer.moved = true;
+      // The pointer mostly stirs. It deposits a thin wake of ink and the rest
+      // of the effect is momentum tearing the existing plume into vortices.
+      stroke(pointer.px, pointer.py, p.x, p.y, vx, vy, CFG.inkPerCell);
+    }
+    pointer.px = p.x; pointer.py = p.y;
+    pointer.x = p.x; pointer.y = p.y;
+  }
+
+  function onUp(event) {
+    if (!pointer.down) return;
+    pointer.down = false; pointer.id = null;
+    if (!pointer.moved) {
+      var p = toGrid(event);
+      splat(p.x, p.y, 0, 0, 0.26);
+    }
+  }
+
+  canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointermove', onMove);
+  canvas.addEventListener('pointerup', onUp);
+  canvas.addEventListener('pointercancel', onUp);
+
+  var hintHidden = false;
+  function hideHint() {
+    if (hintHidden) return;
+    hintHidden = true;
+    hint.classList.add('gone');
+  }
+  setTimeout(hideHint, 6000);
+
+  window.addEventListener('keydown', function (e) {
+    if (e.key === 'c' || e.key === 'C') {
+      dens.fill(0); u.fill(0); v.fill(0);
+    }
+  });
+
+  /* -------------------------------------------------------------- render */
+
+  var BG = [117, 182, 248];
+  var INK = [255, 255, 255];
+
+  function render() {
+    ctx.fillStyle = 'rgb(' + BG[0] + ',' + BG[1] + ',' + BG[2] + ')';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    var n = ramp.length;
+    ctx.fillStyle = 'rgb(' + INK[0] + ',' + INK[1] + ',' + INK[2] + ')';
+    for (var y = 0; y < H; y++) {
+      var row = y * W;
+      for (var x = 0; x < W; x++) {
+        var d = dens[row + x];
+        if (d < 0.004) continue;
+        if (d > 1) d = 1;
+        // Slight gamma so the faint fringe of the plume stays visible instead
+        // of clipping to the first, nearly-blank rung of the ramp.
+        var t = Math.pow(d, 0.62);
+        var gi = ramp[Math.min(n - 1, (t * n) | 0)];
+        // No alpha fade: density is carried by which glyph is chosen, and the
+        // lightest rungs are already thin. Fading them on top would grey the
+        // whole fringe out instead of leaving crisp sparse characters.
+        ctx.drawImage(atlas, gi * glyphW, 0, glyphW, glyphH,
+          x * glyphW, y * glyphH, glyphW, glyphH);
+      }
+    }
+  }
+
+  /* ---------------------------------------------------------------- loop */
+
+  var acc = 0, last = performance.now();
+  var lastTick = performance.now(), timerDriving = false;
+
+  function frame(now) {
+    var dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.1) dt = 0.1;   // a backgrounded tab must not flush a huge step
+
+    acc += dt;
+    var steps = 0;
+    while (acc >= CFG.dt && steps < 3) { step(CFG.dt); acc -= CFG.dt; steps += 1; }
+    if (steps === 3) acc = 0;
+
+    render();
+  }
+
+  function rafLoop() {
+    if (!timerDriving) { lastTick = performance.now(); frame(lastTick); }
+    requestAnimationFrame(rafLoop);
+  }
+
+  /* Some embedding surfaces never deliver animation frames: a background tab,
+   * a panel webview, a headless capture. There the piece is not "wrong", it
+   * simply never ticks, and a canvas that was only ever painted by rAF stays
+   * an empty rectangle. Timers keep firing in those contexts, so watch for a
+   * stalled loop and drive it from one instead. */
+  setInterval(function () {
+    var now = performance.now();
+    if (now - lastTick > 500) {
+      timerDriving = true;
+      lastTick = now;
+      frame(now);
+    } else if (timerDriving) {
+      timerDriving = false;   // animation frames came back
+    }
+  }, 100);
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(rafLoop);
+
+})();
+</script>
+</body>
+</html>
